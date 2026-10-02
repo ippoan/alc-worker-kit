@@ -240,6 +240,10 @@
 #[cfg(target_arch = "wasm32")]
 pub mod hyperdrive;
 mod kind;
+/// 実 DB のテストの準備と接続 (`tests/tenant_tx_db.rs` と同じもの。crate の中のテストだけが使う)
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
 mod tx;
 
 pub use kind::kind;

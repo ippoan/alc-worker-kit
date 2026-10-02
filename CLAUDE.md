@@ -29,7 +29,8 @@ cargo test --locked --doc --all-features   # compile_fail の doctest
 - **テナント分離を弱めない。** `tenant_tx` の順 (`BEGIN` → `SET_TENANT` → `f` → `COMMIT`) と `SET_TENANT` の文 (第 3 引数 `true`) を変えない。
   `TxOutput` を `Row`・`Statement`・`RowStream` に付けない。`compile_fail` の doctest を外さない。
 - **実 DB のテストを skip にしない。** 接続先 (`KIT_TEST_ADMIN_DATABASE_URL`) が無ければ失敗する作りのまま。`#[ignore]` を付けない。
-  本体のテストは非所有者・`NOBYPASSRLS` のロールで繋ぐ。行カバレッジ 100% の gate と、CI の本数の固定を緩めない
+  本体のテストは非所有者・`NOBYPASSRLS` のロールで繋ぐ (準備と接続は `tests/support/mod.rs` の 1 つ)。
+  `PgClient` の中の `Client` を読む検査は `src/tx.rs` の `#[cfg(test)] mod tests` に置き、そのために口 (`into_inner`・テスト用の feature) を足さない。行カバレッジ 100% の gate と、CI の本数の固定を緩めない
   (テストを足したら `ci.yml` の本数を上げる)。
 - **エラーの文を出さない。** `kind` と `ConnectError` が出すのは固定の label・SQLSTATE・`io::ErrorKind` の名前だけ。
   `Display` の文・DB の message・JS のエラー文・接続文字列・ホスト名を、戻り値・`Debug`・ログに出さない。

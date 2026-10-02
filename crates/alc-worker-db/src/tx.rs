@@ -120,3 +120,68 @@ impl<T: TxOutput> TxOutput for Vec<T> {}
 impl<A: TxOutput, B: TxOutput> TxOutput for (A, B) {}
 impl<A: TxOutput, B: TxOutput, C: TxOutput> TxOutput for (A, B, C) {}
 impl<A: TxOutput, B: TxOutput, C: TxOutput, D: TxOutput> TxOutput for (A, B, C, D) {}
+
+/// 「COMMIT / ROLLBACK の後、**その接続に**設定が残っていない」を実 DB で確かめる。
+/// `PgClient` の中の `Client` を同じ接続のまま読む必要が在るので、`tests/` ではなくここに置く
+/// (このために口を広げない)。接続先・準備・接続ロールは `tests/tenant_tx_db.rs` と同じ
+/// (`tests/support`。`KIT_TEST_ADMIN_DATABASE_URL` が未設定なら失敗する)。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support as support;
+
+    const READ_SETTINGS: &str =
+        "SELECT current_setting('app.current_tenant_id', true), current_setting('search_path')";
+
+    /// transaction の外で、この接続の (`app.current_tenant_id`, `search_path`) を読む。
+    /// 一度も設定していない接続では前者は NULL、transaction スコープの設定が消えた後は空文字
+    async fn session_settings(pg: &PgClient) -> (String, String) {
+        let messages = pg.client.simple_query(READ_SETTINGS).await.unwrap();
+        let mut row = support::first_row(&messages).into_iter();
+        let tenant = row.next().unwrap().unwrap_or_default();
+        let search_path = row.next().unwrap().unwrap();
+        (tenant, search_path)
+    }
+
+    async fn connect() -> PgClient {
+        let (client, _task) = support::rt_raw_connect().await;
+        PgClient::new(client)
+    }
+
+    #[tokio::test]
+    async fn commit_leaves_no_setting_on_the_connection() {
+        let mut pg = connect().await;
+        let tenant = Uuid::new_v4();
+        let inside: (String, String) = pg
+            .tenant_tx(tenant, |tx| {
+                Box::pin(async move {
+                    let row = tx.query_typed_one(READ_SETTINGS, &[]).await?;
+                    Ok((row.get(0), row.get(1)))
+                })
+            })
+            .await
+            .unwrap();
+        // tx の中では設定されている (同じ文で読めることの対照)
+        assert_eq!(inside, (tenant.to_string(), "alc_api".to_owned()));
+
+        let (tenant_after, search_path_after) = session_settings(&pg).await;
+        assert_eq!(tenant_after, "");
+        assert_ne!(search_path_after, "alc_api");
+    }
+
+    #[tokio::test]
+    async fn err_leaves_no_setting_on_the_connection() {
+        let mut pg = connect().await;
+        // 0 除算 (22012) で f が Err を返す
+        let result = pg
+            .tenant_tx(Uuid::new_v4(), |tx| {
+                Box::pin(async move { tx.execute_typed("SELECT 1 / 0", &[]).await })
+            })
+            .await;
+        assert_eq!(crate::kind(&result.unwrap_err()), "22012");
+
+        let (tenant_after, search_path_after) = session_settings(&pg).await;
+        assert_eq!(tenant_after, "");
+        assert_ne!(search_path_after, "alc_api");
+    }
+}

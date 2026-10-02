@@ -1,69 +1,30 @@
-//! `PgClient::tenant_tx`・`TenantTx`・`kind` を実 DB (postgres 16) で確かめる。
+//! `PgClient::tenant_tx`・`TenantTx`・`kind` を、公開の口だけを使って実 DB (postgres 16) で確かめる。
 //!
 //! ```bash
 //! KIT_TEST_ADMIN_DATABASE_URL=postgresql://postgres:<password>@127.0.0.1:<port>/postgres \
-//!   cargo test -p alc-worker-db --all-features --test tenant_tx_db
+//!   cargo test -p alc-worker-db --all-features
 //! ```
 //!
-//! - **`KIT_TEST_ADMIN_DATABASE_URL` が未設定なら失敗する** (skip して緑にしない)。値は準備用の superuser の
-//!   接続文字列で、**使い捨ての DB に向けること** (テストが schema `alc_api`・表・ロールを作る)。表示はしない
-//! - 準備 ([`prepare`]) だけを superuser で流す。**本体のテストは、表の所有者ではない・`NOSUPERUSER`・
-//!   `NOBYPASSRLS` のロール [`RT_ROLE`] で繋ぐ** ([`rt_connect`] が毎回 `pg_roles` を読んで確かめる)。
-//!   [`RT_PASSWORD`] は使い捨ての DB 専用の固定の文字列で、秘密ではない
-//! - 表の RLS は ippoan/alc-migrations の `vein_templates` と同じ式 (`FORCE` なし)
+//! - 接続先・準備・接続ロールは [`support`] (`KIT_TEST_ADMIN_DATABASE_URL` が未設定なら失敗する。
+//!   本体のテストは非所有者・`NOBYPASSRLS` のロールで繋ぐ)
+//! - 「COMMIT / ROLLBACK の後、**その接続に**設定が残っていない」は、`PgClient` の中の `Client` を読まないと
+//!   観測できないので、crate の中のテスト (`src/tx.rs`) に在る
 //! - テストごとに乱数の tenant UUID を使い、自分が入れた行は終わりに消す
 //! - この crate の規範どおり、テストの中でも名前付き prepared statement は使わない
 //!   (`query_typed` 系・`simple_query`・`batch_execute` だけ)
 
+mod support;
+
 use chrono::{DateTime, Utc};
 use tokio::net::TcpListener;
-use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Type;
-use tokio_postgres::{Client, Config, NoTls, SimpleQueryMessage};
+use tokio_postgres::{Config, NoTls};
 use uuid::Uuid;
 
 use alc_worker_db::{kind, PgClient, SET_TENANT};
-
-const ADMIN_URL_ENV: &str = "KIT_TEST_ADMIN_DATABASE_URL";
-/// 本体のテストが繋ぐロール
-const RT_ROLE: &str = "kit_test_rt";
-/// 使い捨ての DB 専用 (秘密ではない)
-const RT_PASSWORD: &str = "kit-test-rt-throwaway";
-
-/// 準備。並列に走るテスト (別プロセスを含む) が同時に流しても壊れないよう、advisory lock で直列にする。
-/// 何度流しても同じ結果になる書き方 (`IF NOT EXISTS`・在るかを見てから作る)。
-const PREPARE: &str = r"
-BEGIN;
-SELECT pg_advisory_xact_lock(723001);
-CREATE SCHEMA IF NOT EXISTS alc_api;
-CREATE TABLE IF NOT EXISTS alc_api.kit_rls_probe (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id uuid NOT NULL,
-    note text NOT NULL,
-    at timestamptz NOT NULL DEFAULT now()
-);
-ALTER TABLE alc_api.kit_rls_probe ENABLE ROW LEVEL SECURITY;
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT FROM pg_policies
-        WHERE schemaname = 'alc_api' AND tablename = 'kit_rls_probe' AND policyname = 'tenant_isolation'
-    ) THEN
-        CREATE POLICY tenant_isolation ON alc_api.kit_rls_probe
-            USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
-    END IF;
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kit_test_rt') THEN
-        CREATE ROLE kit_test_rt;
-    END IF;
-END
-$$;
-ALTER ROLE kit_test_rt LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'kit-test-rt-throwaway';
-GRANT USAGE ON SCHEMA alc_api TO kit_test_rt;
-GRANT SELECT, INSERT, UPDATE, DELETE ON alc_api.kit_rls_probe TO kit_test_rt;
-COMMIT;
-";
+use support::{admin_config, first_row, prepare, raw_connect, rt_raw_connect, RT_ROLE};
 
 const INSERT: &str = "INSERT INTO kit_rls_probe (tenant_id, note) VALUES ($1, $2)";
 /// WHERE を付けない読み取り (絞るのは RLS だけ)
@@ -73,57 +34,10 @@ const DELETE_ALL: &str = "DELETE FROM kit_rls_probe";
 const READ_SETTINGS: &str =
     "SELECT current_setting('app.current_tenant_id', true), current_setting('search_path')";
 
-/// 準備用の superuser の接続設定。接続文字列は表示しない
-fn admin_config() -> Config {
-    let url = std::env::var(ADMIN_URL_ENV).unwrap_or_else(|_| {
-        panic!("{ADMIN_URL_ENV} が未設定。実 DB のテストは接続先が無ければ失敗させる (skip しない)")
-    });
-    url.parse()
-        .unwrap_or_else(|_| panic!("{ADMIN_URL_ENV} が接続文字列として読めない"))
-}
-
-async fn raw_connect(config: &Config) -> (Client, JoinHandle<()>) {
-    let (client, connection) = config
-        .connect(NoTls)
-        .await
-        .unwrap_or_else(|e| panic!("{ADMIN_URL_ENV} の DB に繋げない: {}", kind(&e)));
-    let task = tokio::spawn(async move {
-        // 接続の終わり方 (テストが切る場合を含む) はここでは見ない
-        let _ = connection.await;
-    });
-    (client, task)
-}
-
-/// 準備をプロセスの中で 1 回だけ流す
-async fn prepare() {
-    static PREPARED: OnceCell<()> = OnceCell::const_new();
-    PREPARED
-        .get_or_init(|| async {
-            let (admin, _task) = raw_connect(&admin_config()).await;
-            admin.batch_execute(PREPARE).await.unwrap();
-        })
-        .await;
-}
-
-/// [`RT_ROLE`] の素の接続 (admin の接続設定の user と password だけを差し替える)
-async fn rt_raw_connect() -> (Client, JoinHandle<()>) {
-    prepare().await;
-    let mut config = admin_config();
-    config.user(RT_ROLE).password(RT_PASSWORD);
-    raw_connect(&config).await
-}
-
-/// 本体のテストの接続。**ロールが superuser か BYPASSRLS なら panic** (準備のミスで RLS を素通りしたまま
-/// 緑にしない)。
+/// 本体のテストの接続 ([`RT_ROLE`]。superuser / BYPASSRLS なら [`rt_raw_connect`] が panic する)
 async fn rt_connect() -> (PgClient, JoinHandle<()>) {
     let (client, task) = rt_raw_connect().await;
-    let mut pg = PgClient::new(client);
-    let (rolsuper, rolbypassrls) = role_flags(&mut pg).await;
-    assert!(
-        !rolsuper && !rolbypassrls,
-        "テストの接続ロールが superuser / BYPASSRLS (RLS が効かない)"
-    );
-    (pg, task)
+    (PgClient::new(client), task)
 }
 
 /// この接続のロールの (`rolsuper`, `rolbypassrls`)
@@ -435,6 +349,115 @@ async fn timestamptz_round_trips_as_tx_output() {
     assert_eq!(echoed, Some(at));
 }
 
+/// 5 (追加): `Type::TEXT_ARRAY` (`= ANY($1)` に `Vec<String>`) と `Type::INT4` (`i32`) の引数が、
+/// `query_typed` と `execute_typed` の両方で通る
+#[tokio::test]
+async fn text_array_and_int4_params() {
+    let (mut pg, _task) = rt_connect().await;
+    let tenant = Uuid::new_v4();
+    for note in ["a", "bb", "ccc"] {
+        assert_eq!(insert(&mut pg, tenant, note).await, 1);
+    }
+
+    let wanted = vec!["a".to_owned(), "ccc".to_owned(), "none".to_owned()];
+    let (read, deleted): (Vec<(String, i32)>, u64) = pg
+        .tenant_tx(tenant, move |tx| {
+            Box::pin(async move {
+                let rows = tx
+                    .query_typed(
+                        "SELECT note, length(note) + $2 FROM kit_rls_probe WHERE note = ANY($1) ORDER BY note",
+                        &[(&wanted, Type::TEXT_ARRAY), (&10_i32, Type::INT4)],
+                    )
+                    .await?;
+                let deleted = tx
+                    .execute_typed(
+                        "DELETE FROM kit_rls_probe WHERE note = ANY($1) AND length(note) = $2",
+                        &[(&wanted, Type::TEXT_ARRAY), (&3_i32, Type::INT4)],
+                    )
+                    .await?;
+                Ok((rows.iter().map(|r| (r.get(0), r.get(1))).collect(), deleted))
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(read, [("a".to_owned(), 11), ("ccc".to_owned(), 13)]);
+    assert_eq!(deleted, 1);
+
+    // 残りは "a" と "bb"
+    assert_eq!(cleanup(&mut pg, tenant).await, 2);
+}
+
+/// 2 (追加): 1 つの `PgClient` で `tenant_tx` を続けて 200 回開ける (接続を張り直さない)。
+/// テナントを交互に替え、毎回 tx の中の値が渡した tenant
+#[tokio::test]
+async fn one_client_opens_200_transactions_in_a_row() {
+    let (mut pg, _task) = rt_connect().await;
+    let tenants = [Uuid::new_v4(), Uuid::new_v4()];
+    for n in 0..200 {
+        let tenant = tenants[n % 2];
+        assert_eq!(
+            settings(&mut pg, tenant).await,
+            (Some(tenant.to_string()), "alc_api".to_owned()),
+            "{n} 回目"
+        );
+    }
+}
+
+/// 無ければ入れ、在れば書き換える。その後、同じ tx の中でもう 1 文流す。
+/// 戻り値は (入れたか, 1 つ目の書き込みの行数, 2 つ目の書き込みの行数)
+async fn put_note(pg: &mut PgClient, tenant: Uuid) -> (bool, u64, u64) {
+    pg.tenant_tx(tenant, move |tx| {
+        Box::pin(async move {
+            let found = tx
+                .query_typed(
+                    "SELECT id FROM kit_rls_probe WHERE note = $1",
+                    &[(&"branch", Type::TEXT)],
+                )
+                .await?;
+            // 途中の結果で分岐する
+            let (inserted, first) = match found.first() {
+                None => {
+                    let n = tx
+                        .execute_typed(INSERT, &[(&tenant, Type::UUID), (&"branch", Type::TEXT)])
+                        .await?;
+                    (true, n)
+                }
+                Some(row) => {
+                    let id: Uuid = row.get(0);
+                    let n = tx
+                        .execute_typed(
+                            "UPDATE kit_rls_probe SET at = now() WHERE id = $1",
+                            &[(&id, Type::UUID)],
+                        )
+                        .await?;
+                    (false, n)
+                }
+            };
+            let second = tx
+                .execute_typed(
+                    "UPDATE kit_rls_probe SET note = note WHERE note = $1",
+                    &[(&"branch", Type::TEXT)],
+                )
+                .await?;
+            Ok((inserted, first, second))
+        })
+    })
+    .await
+    .unwrap()
+}
+
+/// 2 (追加): 1 transaction の中で `query_typed` → `execute_typed` → `execute_typed` を順に await し、
+/// 途中の結果で分岐する形
+#[tokio::test]
+async fn several_statements_in_one_transaction_with_a_branch() {
+    let (mut pg, _task) = rt_connect().await;
+    let tenant = Uuid::new_v4();
+    // 1 回目は行が無いので入れる側、2 回目は在るので書き換える側
+    assert_eq!(put_note(&mut pg, tenant).await, (true, 1, 1));
+    assert_eq!(put_note(&mut pg, tenant).await, (false, 1, 1));
+    assert_eq!(cleanup(&mut pg, tenant).await, 1);
+}
+
 /// 6: 並列。接続 8 本を同時に、テナント 2 つを交互に各 50 tx。各 tx で自テナントの行を 1 つ入れ、
 /// WHERE なしで読んだ行が全部自テナント
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -560,17 +583,7 @@ async fn prepared_role_has_login_without_bypass() {
         )
         .await
         .unwrap();
-    let row: Vec<Option<String>> = messages
-        .iter()
-        .find_map(|m| match m {
-            SimpleQueryMessage::Row(row) => Some(
-                (0..row.len())
-                    .map(|i| row.get(i).map(str::to_owned))
-                    .collect(),
-            ),
-            _ => None,
-        })
-        .unwrap();
+    let row = first_row(&messages);
     let flags: Vec<&str> = row.iter().map(|c| c.as_deref().unwrap()).collect();
     assert_eq!(flags, ["t", "f", "f"]);
 }

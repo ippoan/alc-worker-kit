@@ -93,7 +93,11 @@ KIT_TEST_ADMIN_DATABASE_URL=postgresql://postgres:<その場の文字列>@127.0.
 cargo test --locked --doc --all-features   # compile_fail の doctest
 ```
 
-実 DB のテスト (`crates/alc-worker-db/tests/tenant_tx_db.rs`) は postgres 16 の**使い捨ての DB** に向ける:
+実 DB のテストは 2 か所に在り、どちらも postgres 16 の**使い捨ての DB** に向ける (準備と接続は `crates/alc-worker-db/tests/support/mod.rs` の 1 つを共有):
+
+- `crates/alc-worker-db/tests/tenant_tx_db.rs` — 公開の口だけを使う検査
+- `crates/alc-worker-db/src/tx.rs` の `#[cfg(test)] mod tests` — 「COMMIT / ROLLBACK の後、**その接続に**設定が残っていない」。
+  `PgClient` の中の `Client` を同じ接続のまま読む必要が在るので crate の中に置く (このために口を広げない)
 
 ```bash
 docker run -d --rm --name <自分の名前> -e POSTGRES_PASSWORD=<その場の文字列> -p 127.0.0.1::5432 postgres:16
@@ -105,11 +109,12 @@ docker rm -f <自分の名前>         # 終わったら自分のぶんだけ消
 - テストが自分で schema `alc_api`・表 `kit_rls_probe` (RLS の式は ippoan/alc-migrations の `vein_templates` と同じ、`FORCE` なし)・
   ロール `kit_test_rt` (`LOGIN`・`NOSUPERUSER`・`NOBYPASSRLS`・表の所有者ではない) を作り、**本体のテストはそのロールで繋ぐ**
   (接続のたびに `pg_roles` を読み、superuser / BYPASSRLS なら panic)。ロールのパスワードはテストの中の固定の文字列で、使い捨ての DB 専用。
-- 確かめていること: transaction の中の設定と search_path / COMMIT の後に残らない / `Err` で書き込みが残らない /
+- 確かめていること: transaction の中の設定と search_path / COMMIT・ROLLBACK の後、その接続に設定が残らない / `Err` で書き込みが残らない /
+  1 つの `PgClient` で 200 回続けて開ける / 1 transaction の中の複数の文と分岐 /
   RLS だけで他テナントが止まる (WHERE なしの読み取り・他テナントの `tenant_id` での INSERT は 42501) /
-  テナントを設定しない transaction は読めない (テストが張った素の `Client` で) / `execute_typed` の行数と `UUID`・`TIMESTAMPTZ`・`TEXT` の引数 /
+  テナントを設定しない transaction は読めない (テストが張った素の `Client` で) / `execute_typed` の行数と `UUID`・`TIMESTAMPTZ`・`TEXT`・`TEXT_ARRAY`・`INT4` の引数 /
   並列 (接続 8 本・テナント 2 つ・各 50 tx) / `current_user()` / `kind` (SQLSTATE・切れた接続)。
-- CI は走ったテストの本数を固定で見る (テストを足したら `ci.yml` の本数も上げる)。
+- CI は走ったテストの本数を、lib (6 本) と `tests/` (15 本) の両方について固定で見る (テストを足したら `ci.yml` の本数も上げる)。
 
 ## 限界
 
