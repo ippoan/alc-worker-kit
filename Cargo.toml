@@ -1,0 +1,5 @@
+# 分割 worker (Cloudflare Workers、workers-rs + tokio-postgres) が共通で使う部品の workspace
+# (Refs ippoan/rust-alc-api#723)。この直下は package を持たない。Cargo.lock は直下の 1 つ。
+[workspace]
+resolver = "2"
+members = ["crates/alc-worker-db"]
