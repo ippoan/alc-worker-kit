@@ -25,7 +25,7 @@ jobs:
     # 実 DB のテスト (crates/alc-worker-db/tests/tenant_tx_db.rs) の接続先。runner の中の使い捨ての DB
     services:
       postgres:
-        image: postgres:16
+        image: postgres:17
         env:
           POSTGRES_PASSWORD: test
         options: >-

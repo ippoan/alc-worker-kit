@@ -13,7 +13,7 @@ cargo fmt --all --check
 cargo clippy --locked --all-features --all-targets -- -D warnings
 cargo clippy --locked --target wasm32-unknown-unknown --all-features -- -D warnings
 cargo build --locked --target wasm32-unknown-unknown --all-features
-# 実 DB のテスト + 行カバレッジ 100% (使い捨ての postgres 16 を空きポートで立ててから。README の「検査の回し方」)
+# 実 DB のテスト + 行カバレッジ 100% (使い捨ての postgres 17 を空きポートで立ててから。README の「検査の回し方」)
 KIT_TEST_ADMIN_DATABASE_URL=... cargo llvm-cov --locked --all-features --fail-under-lines 100
 cargo test --locked --doc --all-features   # compile_fail の doctest
 ```

@@ -93,14 +93,14 @@ KIT_TEST_ADMIN_DATABASE_URL=postgresql://postgres:<その場の文字列>@127.0.
 cargo test --locked --doc --all-features   # compile_fail の doctest
 ```
 
-実 DB のテストは 2 か所に在り、どちらも postgres 16 の**使い捨ての DB** に向ける (準備と接続は `crates/alc-worker-db/tests/support/mod.rs` の 1 つを共有):
+実 DB のテストは 2 か所に在り、どちらも postgres 17 の**使い捨ての DB** に向ける。版は本番 (PostgreSQL 17 系) に合わせる (準備と接続は `crates/alc-worker-db/tests/support/mod.rs` の 1 つを共有):
 
 - `crates/alc-worker-db/tests/tenant_tx_db.rs` — 公開の口だけを使う検査
 - `crates/alc-worker-db/src/tx.rs` の `#[cfg(test)] mod tests` — 「COMMIT / ROLLBACK の後、**その接続に**設定が残っていない」。
   `PgClient` の中の `Client` を同じ接続のまま読む必要が在るので crate の中に置く (このために口を広げない)
 
 ```bash
-docker run -d --rm --name <自分の名前> -e POSTGRES_PASSWORD=<その場の文字列> -p 127.0.0.1::5432 postgres:16
+docker run -d --rm --name <自分の名前> -e POSTGRES_PASSWORD=<その場の文字列> -p 127.0.0.1::5432 postgres:17
 docker port <自分の名前>          # 割り当てられたポートを読む
 docker rm -f <自分の名前>         # 終わったら自分のぶんだけ消す
 ```

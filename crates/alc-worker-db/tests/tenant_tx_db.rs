@@ -1,4 +1,4 @@
-//! `PgClient::tenant_tx`・`TenantTx`・`kind` を、公開の口だけを使って実 DB (postgres 16) で確かめる。
+//! `PgClient::tenant_tx`・`TenantTx`・`kind` を、公開の口だけを使って実 DB (postgres 17) で確かめる。
 //!
 //! ```bash
 //! KIT_TEST_ADMIN_DATABASE_URL=postgresql://postgres:<password>@127.0.0.1:<port>/postgres \
