@@ -1,0 +1,34 @@
+# 分割 worker の DB の部品 (Refs ippoan/rust-alc-api#723)。
+# `tokio_postgres::Client` と `Transaction` を呼び手に渡さず、型付きの名前なしの文だけを出す型で包む
+# (Hyperdrive 経由では名前付き prepared statement で接続が切れるため)。
+# transaction の部品は native でも動く。Hyperdrive への接続 (`hyperdrive` module) だけ wasm32 専用。
+[package]
+name = "alc-worker-db"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# `chrono::DateTime<chrono::Utc>` に `TxOutput` を付けるだけ
+chrono = ["dep:chrono"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio-postgres = { version = "0.7", default-features = false }
+uuid = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio-postgres = { version = "0.7", default-features = false, features = ["js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+# feature tokio-postgres は Socket の StartTls を tokio-postgres に渡す PassthroughTls のため
+worker = { version = "0.8", features = ["tokio-postgres"] }
+
+# 実 DB のテスト (tests/tenant_tx_db.rs、native) 用
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+chrono = { version = "0.4", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+# テストごとの乱数の tenant UUID
+uuid = { version = "1", features = ["v4"] }

@@ -1,0 +1,85 @@
+name: CI
+
+# 共通 crate alc-worker-db の検査 (Refs ippoan/rust-alc-api#723)。deploy・tag の workflow は無い
+# (利用側は git 依存の rev 固定で引く)。
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # PR の古い run は捨てるが、main は途中で切らない
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  kit:
+    name: kit
+    runs-on: ubuntu-latest
+    # 実 DB のテスト (crates/alc-worker-db/tests/tenant_tx_db.rs) の接続先。runner の中の使い捨ての DB
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-features --all-targets -- -D warnings
+      # hyperdrive module (wasm32 専用) を確かめるのは、この clippy と下のビルドまで
+      - run: cargo clippy --locked --target wasm32-unknown-unknown --all-features -- -D warnings
+      - run: cargo build --locked --target wasm32-unknown-unknown --all-features
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      # 行カバレッジ 100% の gate。テストの実行を兼ねる (unit test + 実 DB のテスト)。
+      # 接続文字列は runner の中の使い捨ての DB のもので、secret ではない
+      - name: Coverage 100% gate (実 DB のテストを含む)
+        env:
+          KIT_TEST_ADMIN_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
+        run: |
+          set -o pipefail
+          cargo llvm-cov --locked --all-features --fail-under-lines 100 2>&1 | tee "$RUNNER_TEMP/kit-cov.txt"
+      # 1 本も走らずに緑になる・テストが減る、を防ぐ。**テストを足したら下の本数も上げる**
+      - name: 走ったテストの本数 (unit 4 本・実 DB 12 本、0 ignored)
+        run: |
+          result_after() {
+            awk -v target="$1" 'index($0, "Running " target) { found = 1 } found && /^test result:/ { print; exit }' "$RUNNER_TEMP/kit-cov.txt"
+          }
+          result_after 'unittests src/lib.rs' | tee /dev/stderr | grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;'
+          result_after 'tests/tenant_tx_db.rs' | tee /dev/stderr | grep -Eq '^test result: ok\. 12 passed; 0 failed; 0 ignored;'
+      # compile_fail の doctest (型で塞いでいることの固定)。stable の llvm-cov は doctest を回さないので別に流す
+      - run: cargo test --locked --doc --all-features
+
+  # green の PR を merge する (ippoan/ci-workflows の reusable。merge は GitHub App の token で行う)
+  auto-merge:
+    name: Auto Merge
+    needs: [kit]
+    if: github.event_name == 'pull_request' && needs.kit.result == 'success'
+    uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+      # 無いと startup_failure になる
+      checks: read
+    secrets:
+      CI_APP_ID: ${{ secrets.CI_APP_ID }}
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
