@@ -55,6 +55,8 @@ jobs:
       - name: Coverage 100% gate (実 DB のテストを含む)
         env:
           KIT_TEST_ADMIN_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
+          # 下の本数の検査がログの行を照合するので、色のコードを挟ませない
+          CARGO_TERM_COLOR: never
         run: |
           set -o pipefail
           cargo llvm-cov --locked --all-features --fail-under-lines 100 2>&1 | tee "$RUNNER_TEMP/kit-cov.txt"
@@ -62,7 +64,8 @@ jobs:
       - name: 走ったテストの本数 (lib 6 本・tests 15 本、0 ignored)
         run: |
           result_after() {
-            awk -v target="$1" 'index($0, "Running " target) { found = 1 } found && /^test result:/ { print; exit }' "$RUNNER_TEMP/kit-cov.txt"
+            # 色のコードが混ざっていても当たるよう、先に落としてから照合する
+            awk -v target="$1" '{ gsub(/\033\[[0-9;]*m/, "") } index($0, "Running " target) { found = 1 } found && /^test result:/ { print; exit }' "$RUNNER_TEMP/kit-cov.txt"
           }
           result_after 'unittests src/lib.rs' | tee /dev/stderr | grep -Eq '^test result: ok\. 6 passed; 0 failed; 0 ignored;'
           result_after 'tests/tenant_tx_db.rs' | tee /dev/stderr | grep -Eq '^test result: ok\. 15 passed; 0 failed; 0 ignored;'
