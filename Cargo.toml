@@ -2,4 +2,4 @@
 # (Refs ippoan/rust-alc-api#723)。この直下は package を持たない。Cargo.lock は直下の 1 つ。
 [workspace]
 resolver = "2"
-members = ["crates/alc-worker-db"]
+members = ["crates/alc-core-wasm", "crates/alc-worker-db"]

@@ -1,9 +1,28 @@
 # alc-worker-kit
 
-分割 worker (Cloudflare Workers、workers-rs + tokio-postgres) が共通で使う部品。いま在るのは DB の部品の crate
-`alc-worker-db` (`crates/alc-worker-db`) だけ (Refs ippoan/rust-alc-api#723)。
+分割 worker (Cloudflare Workers、workers-rs + tokio-postgres) が共通で使う部品。crate は 2 つ:
 
-## 何の crate か
+| crate | 中身 |
+|---|---|
+| `alc-worker-db` (`crates/alc-worker-db`) | DB の部品 (テナントの transaction を型で包む・Hyperdrive への接続)。Refs ippoan/rust-alc-api#723。下の「何の crate か」以降はこの crate の話 |
+| `alc-core-wasm` (`crates/alc-core-wasm`) | テナントのヘッダの layer (`require_tenant_header`)・`TenantId`・`AuthUser`・`DbError`・`api_error`・`device_dev`。下の「alc-core-wasm」 |
+
+`alc-worker-db` は `alc-core-wasm` に依存しない (同じ workspace に同居するだけ)。
+
+## alc-core-wasm
+
+Cloud Run (ippoan/rust-alc-api) と分割 worker (alc-dtako-worker・alc-vein-worker) が共有する部分を、
+**rust-alc-api の commit `d28944e` (`crates/alc-core-wasm`) から写した** (Refs ippoan/rust-alc-api#736)。
+src の差は、tests module の 2 か所 (`device_dev.rs` の、失敗時メッセージ引数が別の行に在った `assert!`) だけを 1 行の `assert!` に書き換えた — 行カバレッジ 100% の gate のため。本体のコードは写したまま (`BUILD.bazel` は写していない。`Cargo.toml` の差は `repository` だけ)。
+**利用側 (alc-dtako-worker・alc-vein-worker・rust-alc-api) の引き先を kit に切り替えるのは後の PR。** 切り替えが済むまでは
+rust-alc-api の側も残っているので、**利用側の 1 つの依存の木で出どころを混ぜない** (`TenantId` が別の型になり、
+コンパイルは通るのに全リクエストが 500 になる)。確かめ方: `cargo tree -i alc-core-wasm --target wasm32-unknown-unknown` で出どころが 1 つ。
+
+- native と wasm32 の両方でビルドする。sqlx は任意 feature `sqlx` (`From<sqlx::Error> for DbError`) だけ。
+- テストは src の unit test (19 本) と、kit で足した `crates/alc-core-wasm/tests/` (`api_error.rs` = 各関数の status と body・
+  `STAGING_MODE` で `detail` を出す / 隠す、`db_error_sqlx.rs` = unique_violation の SQLSTATE `23505` だけが `Conflict` になる)。
+
+## 何の crate か (alc-worker-db)
 
 Hyperdrive 経由では、**名前付き prepared statement (`tx.execute`・`tx.query` など) を使うと接続が切れる** (PoC の実測)。
 通るのは型付きの名前なしの文 (`query_typed` 系) だけ。これを呼び手の注意に任せると再発するので、
@@ -72,10 +91,11 @@ git 依存の rev 固定。**書くのは利用側の直下の `Cargo.toml` の 
 ```toml
 [workspace.dependencies]
 alc-worker-db = { git = "https://github.com/ippoan/alc-worker-kit", rev = "<main の commit>", features = ["chrono"] }
+alc-core-wasm = { git = "https://github.com/ippoan/alc-worker-kit", rev = "<同じ commit>" }
 ```
 
-worker と route の crate は `alc-worker-db = { workspace = true }` で継承する。rev を上げたら `cargo update -p alc-worker-db` で
-`Cargo.lock` を一緒に更新し、`cargo tree -i tokio-postgres --target wasm32-unknown-unknown` と
+worker と route の crate は `alc-worker-db = { workspace = true }` (`alc-core-wasm` も同じ) で継承する。2 つの rev は揃える。
+rev を上げたら `cargo update -p alc-worker-db -p alc-core-wasm` で `Cargo.lock` を一緒に更新し、`cargo tree -i tokio-postgres --target wasm32-unknown-unknown` と
 `cargo tree -i worker --target wasm32-unknown-unknown` で版が 1 つであることを確かめる。
 
 ## 検査の回し方
@@ -114,11 +134,15 @@ docker rm -f <自分の名前>         # 終わったら自分のぶんだけ消
   RLS だけで他テナントが止まる (WHERE なしの読み取り・他テナントの `tenant_id` での INSERT は 42501) /
   テナントを設定しない transaction は読めない (テストが張った素の `Client` で) / `execute_typed` の行数と `UUID`・`TIMESTAMPTZ`・`TEXT`・`TEXT_ARRAY`・`INT4` の引数 /
   並列 (接続 8 本・テナント 2 つ・各 50 tx) / `current_user()` / `kind` (SQLSTATE・切れた接続)。
-- CI は走ったテストの本数を、lib (6 本) と `tests/` (15 本) の両方について固定で見る (テストを足したら `ci.yml` の本数も上げる)。
+- CI は走ったテストの本数を test binary ごとに固定で見る (テストを足したら `ci.yml` の本数も上げる):
+  `alc-worker-db` は lib 6 本・`tests/tenant_tx_db.rs` 15 本、`alc-core-wasm` は lib 19 本・`tests/api_error.rs` 6 本・`tests/db_error_sqlx.rs` 4 本。
+  lib.rs を持つ crate が 2 つ在るので、`Running` の行の対象と test binary の名前 (`deps/alc_worker_db-` 等) の両方で区別し、色のコードは落としてから照合する。
 
 ## 限界
 
 - llvm-cov の行 100% は、一度も呼ばれない generic を数えない。
+- 同じ関数が lib の unit test の binary と `tests/` の binary に別々に入ると、llvm-cov の行の集計は**それぞれの binary の側で**行を数える
+  (`report --text` では通っている行が、要約では未到達に数えられることがある)。`tests/db_error_sqlx.rs` が `RowNotFound` も見ているのはこのため。
 - `hyperdrive` module は native では compile されない。CI が確かめるのは wasm32 の clippy とビルドまでで、
   動作は実験用の worker と本番で確かめる。
 - エラーコード付きの `compile_fail` (`compile_fail,E0277` など) を照合するのは nightly だけ。stable は「落ちること」だけを見る
