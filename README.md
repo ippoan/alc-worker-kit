@@ -1,13 +1,31 @@
 # alc-worker-kit
 
-分割 worker (Cloudflare Workers、workers-rs + tokio-postgres) が共通で使う部品。crate は 2 つ:
+分割 worker (Cloudflare Workers、workers-rs + tokio-postgres) が共通で使う部品。crate は 3 つ:
 
 | crate | 中身 |
 |---|---|
 | `alc-worker-db` (`crates/alc-worker-db`) | DB の部品 (テナントの transaction を型で包む・Hyperdrive への接続)。Refs ippoan/rust-alc-api#723。下の「何の crate か」以降はこの crate の話 |
+| `alc-worker-crypto` (`crates/alc-worker-crypto`) | 暗号の部品。`secret` = DB に置く秘密値の AES-256-GCM (`encrypt_secret`・`decrypt_secret`・`decrypt_pem_secret`・`normalize_pem_newlines`)、`jwt` = `sign_rs256`。下の「alc-worker-crypto」 |
 | `alc-core-wasm` (`crates/alc-core-wasm`) | テナントのヘッダの layer (`require_tenant_header`)・`TenantId`・`AuthUser`・`DbError`・`api_error`・`device_dev`。下の「alc-core-wasm」 |
 
-`alc-worker-db` は `alc-core-wasm` に依存しない (同じ workspace に同居するだけ)。
+`alc-worker-db` は `alc-core-wasm` に依存しない (同じ workspace に同居するだけ)。`alc-worker-crypto` もほかの 2 つに依存しない。
+
+## alc-worker-crypto
+
+Refs ippoan/rust-alc-api#747。ippoan/alc-lineworks-worker の `crates/lineworks/src/secret.rs`・`jwt.rs` (9d76fd5) を移し、署名を汎用にした
+(LINE WORKS / LINE の両方の worker が同じものを使う。3 つ目の写しを作らない)。依存の版は alc-lineworks-worker と同じ。pure Rust (RustCrypto) で native と wasm32 の両方でビルドする。
+
+| 名前 | 形 |
+|---|---|
+| `secret::decrypt_secret(ciphertext_b64, key_material) -> Result<String, DecryptError>` | 形式は `base64(nonce[12] + ciphertext + tag[16])`、AES-256-GCM、鍵 = SHA-256(`key_material`)、AAD なし (rust-alc-api の `alc_core::auth_lineworks` と同じ) |
+| `secret::decrypt_pem_secret` | `decrypt_secret` → `normalize_pem_newlines` (rust-alc-api の同名の関数と同じ) |
+| `secret::encrypt_secret(plaintext, key_material) -> Result<String, EncryptError>` | nonce は乱数 (`getrandom`。wasm32 は `crypto.getRandomValues`) |
+| `secret::encrypt_secret_with_nonce` | nonce を呼び手が渡す (テスト用。同じ鍵で nonce を使い回さない) |
+| `secret::normalize_pem_newlines` | 実の改行が無く `\n` (2 文字) が在るときだけ改行に直す |
+| `jwt::sign_rs256<C: Serialize>(private_key_pem, kid: Option<&str>, claims: &C) -> Result<String, JwtError>` | header は `{"alg":"RS256","typ":"JWT"}`、`kid` を渡せば `"kid"` を足す (LINE の channel access token v2.1)。PEM は PKCS#1 / PKCS#8 の両方、前後の空白と `\n` (2 文字) も受ける。claim は呼び手の型 (LINE WORKS / LINE 固有の claim を組む関数は各 worker に置く) |
+
+エラー (`DecryptError` = `base64`・`too_short`・`aead`・`utf8` / `EncryptError` = `rng` / `JwtError` = `key`・`claims`) は段の名前だけで、暗号文・鍵・平文・claim を持たない。
+テストは lib 13 本。rust-alc-api の ring の実装をテストに写し、ring で作った暗号文をここで読める・ここで作った暗号文を ring で読める・固定の値の暗号文が ring と 1 byte も違わない、を確かめる。
 
 ## alc-core-wasm
 
@@ -92,10 +110,11 @@ git 依存の rev 固定。**書くのは利用側の直下の `Cargo.toml` の 
 [workspace.dependencies]
 alc-worker-db = { git = "https://github.com/ippoan/alc-worker-kit", rev = "<main の commit>", features = ["chrono"] }
 alc-core-wasm = { git = "https://github.com/ippoan/alc-worker-kit", rev = "<同じ commit>" }
+alc-worker-crypto = { git = "https://github.com/ippoan/alc-worker-kit", rev = "<同じ commit>" }
 ```
 
-worker と route の crate は `alc-worker-db = { workspace = true }` (`alc-core-wasm` も同じ) で継承する。2 つの rev は揃える。
-rev を上げたら `cargo update -p alc-worker-db -p alc-core-wasm` で `Cargo.lock` を一緒に更新し、`cargo tree -i tokio-postgres --target wasm32-unknown-unknown` と
+worker と route の crate は `alc-worker-db = { workspace = true }` (`alc-core-wasm`・`alc-worker-crypto` も同じ) で継承する。kit から引く crate の rev は揃える (使わない crate は書かない)。
+rev を上げたら `cargo update -p alc-worker-db -p alc-core-wasm` (引いている crate を全部) で `Cargo.lock` を一緒に更新し、`cargo tree -i tokio-postgres --target wasm32-unknown-unknown` と
 `cargo tree -i worker --target wasm32-unknown-unknown` で版が 1 つであることを確かめる。
 
 ## 検査の回し方
@@ -135,8 +154,8 @@ docker rm -f <自分の名前>         # 終わったら自分のぶんだけ消
   テナントを設定しない transaction は読めない (テストが張った素の `Client` で) / `execute_typed` の行数と `UUID`・`TIMESTAMPTZ`・`TEXT`・`TEXT_ARRAY`・`INT4` の引数 /
   並列 (接続 8 本・テナント 2 つ・各 50 tx) / `current_user()` / `kind` (SQLSTATE・切れた接続)。
 - CI は走ったテストの本数を test binary ごとに固定で見る (テストを足したら `ci.yml` の本数も上げる):
-  `alc-worker-db` は lib 6 本・`tests/tenant_tx_db.rs` 15 本、`alc-core-wasm` は lib 19 本・`tests/api_error.rs` 6 本・`tests/db_error_sqlx.rs` 4 本。
-  lib.rs を持つ crate が 2 つ在るので、`Running` の行の対象と test binary の名前 (`deps/alc_worker_db-` 等) の両方で区別し、色のコードは落としてから照合する。
+  `alc-worker-db` は lib 6 本・`tests/tenant_tx_db.rs` 15 本、`alc-core-wasm` は lib 19 本・`tests/api_error.rs` 6 本・`tests/db_error_sqlx.rs` 4 本、`alc-worker-crypto` は lib 13 本。
+  lib.rs を持つ crate が 3 つ在るので、`Running` の行の対象と test binary の名前 (`deps/alc_worker_db-` 等) の両方で区別し、色のコードは落としてから照合する。
 
 ## 限界
 

@@ -1,6 +1,7 @@
 name: CI
 
-# 共通 crate alc-worker-db (Refs ippoan/rust-alc-api#723) と alc-core-wasm (Refs ippoan/rust-alc-api#736) の検査。
+# 共通 crate alc-worker-db (Refs ippoan/rust-alc-api#723)・alc-core-wasm (Refs ippoan/rust-alc-api#736)・
+# alc-worker-crypto (Refs ippoan/rust-alc-api#747) の検査。
 # deploy・tag の workflow は無い (利用側は git 依存の rev 固定で引く)。
 on:
   pull_request:
@@ -61,8 +62,8 @@ jobs:
           set -o pipefail
           cargo llvm-cov --locked --all-features --fail-under-lines 100 2>&1 | tee "$RUNNER_TEMP/kit-cov.txt"
       # 1 本も走らずに緑になる・テストが減る、を防ぐ。**テストを足したら下の本数も上げる**
-      # lib.rs を持つ crate が 2 つ在るので、Running 行の対象と test binary の名前 (`deps/<名前>-`) の両方で区別する
-      - name: 走ったテストの本数 (alc-core-wasm lib 19・api_error 6・db_error_sqlx 4 / alc-worker-db lib 6・tenant_tx_db 15、0 ignored)
+      # lib.rs を持つ crate が 3 つ在るので、Running 行の対象と test binary の名前 (`deps/<名前>-`) の両方で区別する
+      - name: 走ったテストの本数 (alc-core-wasm lib 19・api_error 6・db_error_sqlx 4 / alc-worker-crypto lib 13 / alc-worker-db lib 6・tenant_tx_db 15、0 ignored)
         run: |
           result_after() {
             # $1 = Running 行の対象、$2 = test binary の名前。色のコードが混ざっていても当たるよう、先に落としてから照合する
@@ -74,6 +75,7 @@ jobs:
           expect 'unittests src/lib.rs' alc_core_wasm 19
           expect 'tests/api_error.rs' api_error 6
           expect 'tests/db_error_sqlx.rs' db_error_sqlx 4
+          expect 'unittests src/lib.rs' alc_worker_crypto 13
           expect 'unittests src/lib.rs' alc_worker_db 6
           expect 'tests/tenant_tx_db.rs' tenant_tx_db 15
       # compile_fail の doctest (型で塞いでいることの固定)。stable の llvm-cov は doctest を回さないので別に流す

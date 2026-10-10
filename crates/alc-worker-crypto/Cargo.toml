@@ -1,0 +1,30 @@
+# 分割 worker の暗号の部品 (Refs ippoan/rust-alc-api#747)。
+# DB に置く秘密値の AES-256-GCM (rust-alc-api の `alc_core::auth_lineworks` と同じ形式) と、RS256 の JWT の署名。
+# pure Rust (RustCrypto) で、native でも wasm32-unknown-unknown でもビルドできる。
+# 写しの元は ippoan/alc-lineworks-worker の `crates/lineworks/src/secret.rs`・`jwt.rs` (9d76fd5)。依存の版もそこに揃える。
+[package]
+name = "alc-worker-crypto"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# `encrypt_secret` の nonce (rsa → rand_core が引くのと同じ 0.2)
+getrandom = "0.2"
+# 署名は乱数を使わない形 (`Signer::sign`)。PKCS#1 / PKCS#8 の PEM を読む
+rsa = { version = "0.9", default-features = false, features = ["std", "pem", "u64_digit"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = { version = "0.10", default-features = false, features = ["oid"] }
+
+# getrandom 0.2 は wasm32-unknown-unknown では feature `js` (crypto.getRandomValues) が無いと build できない
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+# テストで鍵を作る
+rand = "0.8"
+# rust-alc-api の encrypt_secret / decrypt_secret (ring) をテストに写して、相互に読めることを確かめる
+ring = "0.17"

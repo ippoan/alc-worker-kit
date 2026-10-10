@@ -2,11 +2,12 @@
 
 分割 worker (Cloudflare Workers) が共通で使う部品の workspace。在るのは DB の部品 `crates/alc-worker-db`
 (Refs ippoan/rust-alc-api#723) と、テナントのヘッダの layer・型・エラーの `crates/alc-core-wasm`
-(rust-alc-api から移した。Refs ippoan/rust-alc-api#736) の 2 つ。構造は `.claude/skills/alc-worker-kit-map`、詳細は `README.md`。
+(rust-alc-api から移した。Refs ippoan/rust-alc-api#736) と、暗号の部品 `crates/alc-worker-crypto` (Refs ippoan/rust-alc-api#747) の 3 つ。構造は `.claude/skills/alc-worker-kit-map`、詳細は `README.md`。
 
 - 直下 = workspace の root (package なし。`Cargo.lock` は直下の 1 つ)
 - `crates/alc-worker-db/` = `PgClient`・`TenantTx`・`TxOutput`・`SET_TENANT`・`kind`・`hyperdrive::connect` (wasm32 専用)
 - `crates/alc-core-wasm/` = `require_tenant_header`・`TenantId`・`AuthUser`・`DbError`・`api_error`・`device_dev` (native と wasm32 の両方。feature `sqlx` は任意)
+- `crates/alc-worker-crypto/` = `secret` (`SSO_ENCRYPTION_KEY` の AES-256-GCM。rust-alc-api の ring と同じ形式) と `jwt::sign_rs256` (native と wasm32 の両方。エラーは段の名前だけ)
 
 ## コマンド
 
